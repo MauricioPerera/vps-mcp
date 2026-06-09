@@ -1,5 +1,9 @@
 # vps-mcp
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-stdio-blue.svg)](https://modelcontextprotocol.io)
+[![Node](https://img.shields.io/badge/Node-%E2%89%A518-green.svg)](https://nodejs.org)
+
 Servidor **MCP stateless** para conectarte a tu VPS por SSH y ejecutar comandos.
 Corre en local por **stdio**. No mantiene sesión: cada llamada abre la conexión
 SSH, ejecuta y la cierra.
