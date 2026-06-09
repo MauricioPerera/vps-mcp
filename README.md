@@ -4,9 +4,14 @@
 [![MCP](https://img.shields.io/badge/MCP-stdio-blue.svg)](https://modelcontextprotocol.io)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A518-green.svg)](https://nodejs.org)
 
-Servidor **MCP stateless** para conectarte a tu VPS por SSH y ejecutar comandos.
-Corre en local por **stdio**. No mantiene sesión: cada llamada abre la conexión
-SSH, ejecuta y la cierra.
+Servidor **MCP stateless** para conectarte a **cualquier VPS** por SSH usando
+**tus propias credenciales** y operar sobre él: ejecutar comandos, subir/bajar
+archivos y leer/escribir ficheros remotos.
+
+Corre en local por **stdio**. No mantiene sesión ni guarda credenciales: cada
+llamada abre la conexión SSH, hace el trabajo y la cierra. El servidor no
+contiene datos de ningún VPS — las credenciales las pone cada usuario en la
+config de su propio cliente MCP.
 
 ## Tools expuestas
 
@@ -23,24 +28,35 @@ Las credenciales se definen **una vez** por variables de entorno en la config de
 cliente MCP. Cualquier campo se puede sobreescribir por llamada (`host`, `port`,
 `username`, `password`, `privateKeyPath`, `passphrase`, `timeoutMs`).
 
+## Requisitos
+
+- Node.js ≥ 18
+- Un cliente MCP (Claude Code, Claude Desktop, etc.)
+- Acceso SSH a un VPS (password o clave privada)
+
 ## Instalación
 
-```powershell
-cd D:\repos\vps\vps-mcp
+```bash
+git clone https://github.com/MauricioPerera/vps-mcp.git
+cd vps-mcp
 npm install
 ```
+
+Anotá la ruta absoluta a `index.js` (la necesitás para la config). En estos
+ejemplos se usa `/ruta/a/vps-mcp/index.js`.
 
 ## Configuración en Claude Code
 
 Añadir el servidor con las credenciales como env vars:
 
-```powershell
-claude mcp add vps --scope user `
-  --env VPS_HOST=<TU_IP> --env VPS_USER=root --env VPS_PASSWORD="<TU_PASSWORD>" `
-  -- node D:/repos/vps/vps-mcp/index.js
+```bash
+claude mcp add vps --scope user \
+  --env VPS_HOST=<TU_IP> --env VPS_USER=root --env VPS_PASSWORD="<TU_PASSWORD>" \
+  -- node /ruta/a/vps-mcp/index.js
 ```
 
-> En Windows usá barras normales (`D:/...`) en la ruta: el shell se come los `\`.
+> **Windows:** usá barras normales en la ruta (`C:/ruta/a/vps-mcp/index.js`); el
+> shell de PowerShell se come los `\` al pasarlos como argumento.
 
 O manualmente en el JSON de config MCP:
 
@@ -49,7 +65,7 @@ O manualmente en el JSON de config MCP:
   "mcpServers": {
     "vps": {
       "command": "node",
-      "args": ["D:\\repos\\vps\\vps-mcp\\index.js"],
+      "args": ["/ruta/a/vps-mcp/index.js"],
       "env": {
         "VPS_HOST": "<TU_IP>",
         "VPS_PORT": "22",
@@ -86,9 +102,22 @@ O manualmente en el JSON de config MCP:
 
 ## Prueba rápida (sin cliente MCP)
 
+El script `test-client.js` levanta el server por stdio y llama a
+`ssh_test_connection` + `ssh_exec`. Con `--write` prueba además la escritura y
+ejecución de un script remoto (y limpia al terminar).
+
+PowerShell (Windows):
+
 ```powershell
 $env:VPS_HOST="<TU_IP>"; $env:VPS_USER="root"; $env:VPS_PASSWORD="<TU_PASSWORD>"
-node test-client.js
+node test-client.js          # solo lectura
+node test-client.js --write  # incluye write + exec en /tmp
+```
+
+Bash (Linux/macOS):
+
+```bash
+VPS_HOST=<TU_IP> VPS_USER=root VPS_PASSWORD="<TU_PASSWORD>" node test-client.js
 ```
 
 ## Arquitectura
@@ -98,7 +127,7 @@ MCP client (Claude Code/Desktop)
         │  stdio (JSON-RPC)
         ▼
    index.js  ── por cada tool call ──►  ssh2.Client.connect()
-   (stateless)                          exec / read
+   (stateless)                          exec  /  SFTP (get·put·read·write)
         ▲                               conn.end()   ◄── se cierra siempre
         │
    credenciales: env VPS_* (override por llamada)
