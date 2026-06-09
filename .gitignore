@@ -1,0 +1,9 @@
+node_modules/
+npm-debug.log*
+*.log
+.env
+.env.*
+# Never commit real keys/credentials
+*.pem
+id_rsa*
+id_ed25519*

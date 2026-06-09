@@ -1,0 +1,17 @@
+{
+  "name": "vps-mcp",
+  "version": "1.0.0",
+  "description": "Stateless MCP server to connect to a VPS over SSH and run commands.",
+  "type": "module",
+  "bin": {
+    "vps-mcp": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "ssh2": "^1.16.0",
+    "zod": "^3.25.0"
+  }
+}
