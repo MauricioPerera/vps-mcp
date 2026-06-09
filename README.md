@@ -23,6 +23,11 @@ config de su propio cliente MCP.
 | `ssh_upload_file` | Sube un archivo local al VPS por SFTP (deploy de artefactos). |
 | `ssh_download_file` | Descarga un archivo remoto a tu disco local (backups, binarios, sin límite). |
 | `ssh_write_file` | Escribe texto directo a un archivo remoto (configs, `.env`, scripts). |
+| `ssh_task_start` | Lanza un comando largo como **task en background** (sobrevive al cierre de la conexión). |
+| `ssh_task_status` | Estado del task: `running` / `finished` (+exit code) / `stopped`, con tail de salida. |
+| `ssh_task_logs` | Devuelve la salida completa (o tail) de un task. |
+| `ssh_task_stop` | Termina un task (SIGTERM→SIGKILL al grupo), con `remove` opcional. |
+| `ssh_task_list` | Lista los tasks y su estado. |
 
 Las credenciales se definen **una vez** por variables de entorno en la config del
 cliente MCP. Cualquier campo se puede sobreescribir por llamada (`host`, `port`,
@@ -98,7 +103,8 @@ O manualmente en el JSON de config MCP:
 | `VPS_PASSWORD` | — | Password (si no usás clave). |
 | `VPS_KEY_PATH` | — | Ruta a la clave privada (tiene prioridad sobre password). |
 | `VPS_KEY_PASSPHRASE` | — | Passphrase de la clave, si tiene. |
-| `VPS_TIMEOUT_MS` | `60000` | Timeout por comando. |
+| `VPS_TIMEOUT_MS` | `60000` | Timeout por comando (no aplica a tasks en background). |
+| `VPS_TASK_DIR` | `/tmp/vps-mcp-tasks` | Dir remoto donde los tasks guardan estado/salida. |
 
 ## Prueba rápida (sin cliente MCP)
 
@@ -129,6 +135,9 @@ MCP client (Claude Code/Desktop)
    index.js  ── por cada tool call ──►  ssh2.Client.connect()
    (stateless)                          exec  /  SFTP (get·put·read·write)
         ▲                               conn.end()   ◄── se cierra siempre
+        │
+   tasks: el comando corre detached EN EL VPS (setsid/nohup); el estado
+   vive en VPS_TASK_DIR, no en este server. Por eso sobrevive entre llamadas.
         │
    credenciales: env VPS_* (override por llamada)
 ```
@@ -175,8 +184,34 @@ Sin argumentos obligatorios. Ejecuta `echo OK; id -un; hostname` y devuelve
 - `append` (bool, opcional, default `false`): añade en vez de sobrescribir.
 - `mkdirp` (bool, opcional, default `true`): crea el directorio remoto si falta.
 
-Todas aceptan además los overrides opcionales: `host`, `port`, `username`,
-`password`, `privateKeyPath`, `passphrase`, `timeoutMs`.
+### Tasks en background (comandos largos)
+
+Para comandos que pueden superar el timeout de la llamada (builds, `apt upgrade`,
+deploys, backups), usá tasks en vez de `ssh_exec`. El comando se lanza **detached
+en el VPS** (sobrevive al cierre de la conexión SSH); su salida y exit code se
+guardan en `VPS_TASK_DIR`. Después se consulta con llamadas independientes.
+
+- `ssh_task_start` — `command` (obligatorio). Devuelve `{ taskId, pid }`.
+- `ssh_task_status` — `taskId`; `lines` (tail, default 40). Devuelve
+  `state` (`running`/`finished`/`stopped`), `exitCode`, `outputTail`.
+- `ssh_task_logs` — `taskId`; `lines` (default 200) o `full=true` (+`maxBytes`).
+- `ssh_task_stop` — `taskId`; `remove` (borra el dir del task, default false).
+- `ssh_task_list` — lista todos los tasks y su estado.
+
+Todas las task tools aceptan `taskDir` para sobreescribir el directorio remoto.
+
+Todas las tools aceptan además los overrides opcionales: `host`, `port`,
+`username`, `password`, `privateKeyPath`, `passphrase`, `timeoutMs`.
+
+## Ejemplo: comando largo en background
+
+```text
+1) ssh_task_start   command="apt-get update && apt-get -y upgrade"   → { taskId: task-ab12cd34 }
+2) ssh_task_status  taskId=task-ab12cd34     → state=running, outputTail=...
+   (repetir hasta state=finished)
+3) ssh_task_logs    taskId=task-ab12cd34 full=true
+4) ssh_task_stop    taskId=task-ab12cd34 remove=true   (opcional, para limpiar)
+```
 
 ## Ejemplo: deploy en 2 pasos
 

@@ -31,6 +31,8 @@ const ENV = {
   passphrase: process.env.VPS_KEY_PASSPHRASE,
   // Default safety timeout for a single command, in ms.
   timeoutMs: process.env.VPS_TIMEOUT_MS ? Number(process.env.VPS_TIMEOUT_MS) : 60000,
+  // Remote directory where background tasks store their state/output.
+  taskDir: process.env.VPS_TASK_DIR || "/tmp/vps-mcp-tasks",
 };
 
 /**
@@ -179,11 +181,43 @@ function shQuote(p) {
 }
 
 // ---------------------------------------------------------------------------
+// Background tasks (for commands that run longer than the call timeout).
+//
+// The task lives on the VPS, not in this stateless server: the command is
+// launched detached (setsid/nohup), its output and exit code are written to
+// files under a task directory, and a taskId is returned. Subsequent calls
+// (status/logs/stop) are independent SSH connections that just read/poke those
+// files — nothing is held open here.
+// ---------------------------------------------------------------------------
+
+/** taskIds are produced by `mktemp -d .../task-XXXXXXXX`; validate strictly. */
+function assertTaskId(id) {
+  if (!/^task-[A-Za-z0-9]+$/.test(String(id || ""))) {
+    throw new Error(`Invalid taskId: ${id}`);
+  }
+}
+
+/**
+ * Resolve the effective task status from the raw files:
+ * - exit file present  -> "finished" (with exitCode)
+ * - process alive       -> "running"
+ * - otherwise           -> "stopped" (died without recording an exit code)
+ */
+function resolveTaskState({ alive, exitCode, status }) {
+  if (exitCode !== null && exitCode !== undefined && exitCode !== "") {
+    return { state: "finished", exitCode: Number(exitCode) };
+  }
+  if (alive) return { state: "running", exitCode: null };
+  if (status === "stopped") return { state: "stopped", exitCode: null };
+  return { state: "stopped", exitCode: null };
+}
+
+// ---------------------------------------------------------------------------
 // MCP server definition
 // ---------------------------------------------------------------------------
 const server = new McpServer({
   name: "vps-mcp",
-  version: "1.2.0",
+  version: "1.3.0",
 });
 
 // Shared optional override schema so any tool can override the env defaults.
@@ -430,6 +464,271 @@ server.registerTool(
       return textResult({ downloaded: true, ...r });
     } catch (e) {
       return { isError: true, content: [{ type: "text", text: `Download failed: ${e.message}` }] };
+    }
+  }
+);
+
+// Shared optional task-dir override for all task tools.
+const taskDirShape = {
+  taskDir: z
+    .string()
+    .optional()
+    .describe("Remote directory holding task state (default /tmp/vps-mcp-tasks or VPS_TASK_DIR)"),
+};
+
+// Tool: start a long-running command as a detached background task.
+server.registerTool(
+  "ssh_task_start",
+  {
+    title: "Start a long-running command (background task)",
+    description:
+      "Launch a command on the VPS as a detached background task that keeps running after the SSH connection closes. Returns a taskId to poll with ssh_task_status / ssh_task_logs. Use this instead of ssh_exec for anything that may exceed the call timeout (builds, upgrades, deploys, backups).",
+    inputSchema: {
+      command: z.string().describe("The shell command to run in the background"),
+      ...taskDirShape,
+      ...overrideShape,
+    },
+  },
+  async ({ command, taskDir, ...args }) => {
+    try {
+      const root = taskDir || ENV.taskDir;
+      const b64 = Buffer.from(command, "utf8").toString("base64");
+      // Runner records output, exit code and status; detaches via setsid/nohup.
+      const runner =
+        'sh "$0/cmd.sh" >"$0/output.log" 2>&1; ec=$?; printf "%s" "$ec" > "$0/exit"; echo finished > "$0/status"';
+      const script =
+        `set -e\n` +
+        `ROOT=${shQuote(root)}\n` +
+        `mkdir -p "$ROOT"\n` +
+        `TDIR=$(mktemp -d "$ROOT/task-XXXXXXXX")\n` +
+        `printf '%s' ${shQuote(b64)} | base64 -d > "$TDIR/cmd.sh"\n` +
+        `(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo) > "$TDIR/started"\n` +
+        `echo running > "$TDIR/status"\n` +
+        `if command -v setsid >/dev/null 2>&1; then\n` +
+        `  setsid sh -c '${runner}' "$TDIR" </dev/null >/dev/null 2>&1 &\n` +
+        `else\n` +
+        `  nohup sh -c '${runner}' "$TDIR" </dev/null >/dev/null 2>&1 &\n` +
+        `fi\n` +
+        `echo $! > "$TDIR/pid"\n` +
+        `echo "__TASK__ id=$(basename "$TDIR") pid=$(cat "$TDIR/pid")"\n`;
+
+      const r = await sshExec(script, args);
+      const m = r.stdout.match(/__TASK__ id=(task-[A-Za-z0-9]+) pid=(\d+)/);
+      if (!m) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Could not start task. stdout: ${r.stdout}\nstderr: ${r.stderr}` }],
+        };
+      }
+      return textResult({
+        started: true,
+        taskId: m[1],
+        pid: Number(m[2]),
+        taskDir: root,
+        host: r.host,
+        hint: "Poll with ssh_task_status; fetch output with ssh_task_logs.",
+      });
+    } catch (e) {
+      return { isError: true, content: [{ type: "text", text: `Task start failed: ${e.message}` }] };
+    }
+  }
+);
+
+// Tool: check a background task's status (running / finished / stopped) + tail.
+server.registerTool(
+  "ssh_task_status",
+  {
+    title: "Get a background task's status",
+    description:
+      "Report whether a background task is running, finished (with exit code) or stopped, plus the last lines of its output. Stateless poll over a fresh SSH connection.",
+    inputSchema: {
+      taskId: z.string().describe("The taskId returned by ssh_task_start"),
+      lines: z.number().int().optional().describe("How many trailing output lines to include (default 40)"),
+      ...taskDirShape,
+      ...overrideShape,
+    },
+  },
+  async ({ taskId, lines = 40, taskDir, ...args }) => {
+    try {
+      assertTaskId(taskId);
+      const root = taskDir || ENV.taskDir;
+      const tdir = `${root}/${taskId}`;
+      const script =
+        `TDIR=${shQuote(tdir)}\n` +
+        `if [ ! -d "$TDIR" ]; then echo __NOTFOUND__; exit 0; fi\n` +
+        `PID=$(cat "$TDIR/pid" 2>/dev/null)\n` +
+        `ST=$(cat "$TDIR/status" 2>/dev/null)\n` +
+        `EX=$(cat "$TDIR/exit" 2>/dev/null)\n` +
+        `STARTED=$(cat "$TDIR/started" 2>/dev/null)\n` +
+        `ALIVE=no; if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then ALIVE=yes; fi\n` +
+        `echo "__META__ pid=$PID status=$ST exit=$EX alive=$ALIVE started=$STARTED"\n` +
+        `echo __TAIL__\n` +
+        `tail -n ${Number(lines)} "$TDIR/output.log" 2>/dev/null\n`;
+      const r = await sshExec(script, args);
+      if (r.stdout.includes("__NOTFOUND__")) {
+        return { isError: true, content: [{ type: "text", text: `Task not found: ${taskId}` }] };
+      }
+      const meta = r.stdout.match(
+        /__META__ pid=(\d*) status=(\S*) exit=(\d*) alive=(yes|no) started=(\S*)/
+      );
+      const tail = r.stdout.split("__TAIL__\n")[1] || "";
+      const alive = meta?.[4] === "yes";
+      const exitRaw = meta?.[3] ?? "";
+      const { state, exitCode } = resolveTaskState({ alive, exitCode: exitRaw, status: meta?.[2] });
+      return textResult({
+        taskId,
+        state,
+        exitCode,
+        pid: meta?.[1] ? Number(meta[1]) : null,
+        startedAt: meta?.[5] || null,
+        outputTail: tail,
+        host: r.host,
+      });
+    } catch (e) {
+      return { isError: true, content: [{ type: "text", text: `Status failed: ${e.message}` }] };
+    }
+  }
+);
+
+// Tool: fetch a background task's output log.
+server.registerTool(
+  "ssh_task_logs",
+  {
+    title: "Fetch a background task's output",
+    description:
+      "Return the output (stdout+stderr) captured by a background task. By default returns the last `lines` lines; set full=true to return the whole log (bounded by maxBytes).",
+    inputSchema: {
+      taskId: z.string().describe("The taskId returned by ssh_task_start"),
+      lines: z.number().int().optional().describe("Trailing lines to return when full=false (default 200)"),
+      full: z.boolean().optional().describe("Return the entire log instead of the tail (default false)"),
+      maxBytes: z.number().int().optional().describe("Cap when full=true (default 1048576)"),
+      ...taskDirShape,
+      ...overrideShape,
+    },
+  },
+  async ({ taskId, lines = 200, full = false, maxBytes = 1048576, taskDir, ...args }) => {
+    try {
+      assertTaskId(taskId);
+      const root = taskDir || ENV.taskDir;
+      const log = `${root}/${taskId}/output.log`;
+      const reader = full
+        ? `head -c ${Number(maxBytes)} ${shQuote(log)}`
+        : `tail -n ${Number(lines)} ${shQuote(log)}`;
+      const script =
+        `if [ ! -f ${shQuote(log)} ]; then echo __NOTFOUND__; exit 0; fi\n` +
+        `SIZE=$(wc -c < ${shQuote(log)} 2>/dev/null || echo -1)\n` +
+        `echo "__SIZE__:$SIZE"\n` +
+        reader + `\n`;
+      const r = await sshExec(script, args);
+      if (r.stdout.includes("__NOTFOUND__")) {
+        return { isError: true, content: [{ type: "text", text: `Task log not found: ${taskId}` }] };
+      }
+      const m = r.stdout.match(/^__SIZE__:(-?\d+)\n?/);
+      const size = m ? Number(m[1]) : null;
+      const body = m ? r.stdout.slice(m[0].length) : r.stdout;
+      return textResult({
+        taskId,
+        size,
+        truncated: full && size != null && size > maxBytes,
+        output: body,
+        host: r.host,
+      });
+    } catch (e) {
+      return { isError: true, content: [{ type: "text", text: `Logs failed: ${e.message}` }] };
+    }
+  }
+);
+
+// Tool: stop (and optionally remove) a background task.
+server.registerTool(
+  "ssh_task_stop",
+  {
+    title: "Stop a background task",
+    description:
+      "Terminate a running background task (SIGTERM then SIGKILL to the whole process group). Optionally remove its task directory afterwards.",
+    inputSchema: {
+      taskId: z.string().describe("The taskId returned by ssh_task_start"),
+      remove: z.boolean().optional().describe("Delete the task directory after stopping (default false)"),
+      ...taskDirShape,
+      ...overrideShape,
+    },
+  },
+  async ({ taskId, remove = false, taskDir, ...args }) => {
+    try {
+      assertTaskId(taskId);
+      const root = taskDir || ENV.taskDir;
+      const tdir = `${root}/${taskId}`;
+      const script =
+        `TDIR=${shQuote(tdir)}\n` +
+        `if [ ! -d "$TDIR" ]; then echo __NOTFOUND__; exit 0; fi\n` +
+        `PID=$(cat "$TDIR/pid" 2>/dev/null)\n` +
+        `if [ -n "$PID" ]; then\n` +
+        `  kill -TERM -"$PID" 2>/dev/null; kill -TERM "$PID" 2>/dev/null; pkill -TERM -P "$PID" 2>/dev/null\n` +
+        `  sleep 1\n` +
+        `  kill -KILL -"$PID" 2>/dev/null; kill -KILL "$PID" 2>/dev/null; pkill -KILL -P "$PID" 2>/dev/null\n` +
+        `fi\n` +
+        `echo stopped > "$TDIR/status" 2>/dev/null || true\n` +
+        (remove ? `rm -rf "$TDIR"\n` : ``) +
+        `echo "__STOPPED__ pid=$PID"\n`;
+      const r = await sshExec(script, args);
+      if (r.stdout.includes("__NOTFOUND__")) {
+        return { isError: true, content: [{ type: "text", text: `Task not found: ${taskId}` }] };
+      }
+      const m = r.stdout.match(/__STOPPED__ pid=(\d*)/);
+      return textResult({ stopped: true, taskId, pid: m?.[1] ? Number(m[1]) : null, removed: remove, host: r.host });
+    } catch (e) {
+      return { isError: true, content: [{ type: "text", text: `Stop failed: ${e.message}` }] };
+    }
+  }
+);
+
+// Tool: list background tasks and their states.
+server.registerTool(
+  "ssh_task_list",
+  {
+    title: "List background tasks",
+    description:
+      "List all background tasks under the task directory with their state, pid, exit code and start time.",
+    inputSchema: { ...taskDirShape, ...overrideShape },
+  },
+  async ({ taskDir, ...args }) => {
+    try {
+      const root = taskDir || ENV.taskDir;
+      const script =
+        `ROOT=${shQuote(root)}\n` +
+        `[ -d "$ROOT" ] || { echo __EMPTY__; exit 0; }\n` +
+        `found=no\n` +
+        `for d in "$ROOT"/task-*; do\n` +
+        `  [ -d "$d" ] || continue\n` +
+        `  found=yes\n` +
+        `  PID=$(cat "$d/pid" 2>/dev/null); ST=$(cat "$d/status" 2>/dev/null); EX=$(cat "$d/exit" 2>/dev/null); STARTED=$(cat "$d/started" 2>/dev/null)\n` +
+        `  ALIVE=no; if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then ALIVE=yes; fi\n` +
+        `  echo "$(basename "$d")|$PID|$ST|$EX|$ALIVE|$STARTED"\n` +
+        `done\n` +
+        `[ "$found" = no ] && echo __EMPTY__ || true\n`;
+      const r = await sshExec(script, args);
+      const tasks = [];
+      if (!r.stdout.includes("__EMPTY__")) {
+        for (const line of r.stdout.trim().split("\n")) {
+          const [id, pid, status, ex, alive, started] = line.split("|");
+          if (!id || !id.startsWith("task-")) continue;
+          const { state, exitCode } = resolveTaskState({
+            alive: alive === "yes",
+            exitCode: ex,
+            status,
+          });
+          tasks.push({
+            taskId: id,
+            state,
+            exitCode,
+            pid: pid ? Number(pid) : null,
+            startedAt: started || null,
+          });
+        }
+      }
+      return textResult({ count: tasks.length, taskDir: root, tasks, host: r.host });
+    } catch (e) {
+      return { isError: true, content: [{ type: "text", text: `List failed: ${e.message}` }] };
     }
   }
 );
