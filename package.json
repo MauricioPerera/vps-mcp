@@ -1,6 +1,6 @@
 {
   "name": "vps-mcp",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Stateless MCP server to connect to a VPS over SSH and run commands.",
   "license": "MIT",
   "author": "Mauricio Perera",
@@ -8,12 +8,22 @@
     "type": "git",
     "url": "git+https://github.com/MauricioPerera/vps-mcp.git"
   },
+  "homepage": "https://github.com/MauricioPerera/vps-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/MauricioPerera/vps-mcp/issues"
+  },
+  "keywords": ["mcp", "model-context-protocol", "ssh", "sftp", "vps", "devops"],
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "bin": {
     "vps-mcp": "index.js"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --check index.js && node --check test-client.js",
+    "smoke": "node test-client.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

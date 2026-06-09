@@ -24,7 +24,7 @@ config de su propio cliente MCP.
 | `ssh_download_file` | Descarga un archivo remoto a tu disco local (backups, binarios, sin límite). |
 | `ssh_write_file` | Escribe texto directo a un archivo remoto (configs, `.env`, scripts). |
 | `ssh_task_start` | Lanza un comando largo como **task en background** (sobrevive al cierre de la conexión). |
-| `ssh_task_status` | Estado del task: `running` / `finished` (+exit code) / `stopped`, con tail de salida. |
+| `ssh_task_status` | Estado del task: `running` / `finished`(+exit) / `stopped` / `crashed`, con tail de salida. |
 | `ssh_task_logs` | Devuelve la salida completa (o tail) de un task. |
 | `ssh_task_stop` | Termina un task (SIGTERM→SIGKILL al grupo), con `remove` opcional. |
 | `ssh_task_list` | Lista los tasks y su estado. |
@@ -193,7 +193,9 @@ guardan en `VPS_TASK_DIR`. Después se consulta con llamadas independientes.
 
 - `ssh_task_start` — `command` (obligatorio). Devuelve `{ taskId, pid }`.
 - `ssh_task_status` — `taskId`; `lines` (tail, default 40). Devuelve
-  `state` (`running`/`finished`/`stopped`), `exitCode`, `outputTail`.
+  `state`, `exitCode`, `outputTail`. Estados: `running`, `finished` (con
+  `exitCode`), `stopped` (matado con `ssh_task_stop`) y `crashed` (murió solo:
+  kill externo, OOM, reboot).
 - `ssh_task_logs` — `taskId`; `lines` (default 200) o `full=true` (+`maxBytes`).
 - `ssh_task_stop` — `taskId`; `remove` (borra el dir del task, default false).
 - `ssh_task_list` — lista todos los tasks y su estado.
@@ -235,7 +237,27 @@ O config + script sin archivo local:
 3) ssh_exec        command=/opt/app/deploy.sh
 ```
 
-## Nota de seguridad
+## Seguridad
 
-El password queda en texto plano en la config del MCP. Para uso real conviene
-clave SSH y/o restringir permisos del archivo de config.
+**Esto es shell remoto completo.** `ssh_exec` y `ssh_task_start` ejecutan
+comandos arbitrarios en el VPS, por defecto como `root` (`VPS_USER`). Cualquier
+cliente que hable con este MCP — es decir, el LLM al que se lo conectás —
+obtiene control total del servidor: leer/borrar archivos, instalar software,
+parar servicios. Tratá la conexión como darle una shell root a ese agente.
+
+Mitigaciones recomendadas:
+
+- **Usuario no-root** con `sudo` acotado en vez de `root`, si tu caso lo permite.
+- **Clave SSH** en lugar de password (`VPS_KEY_PATH`); el password queda en
+  texto plano en la config del MCP.
+- **Restringí permisos** del archivo de config del cliente MCP (contiene las
+  credenciales).
+- Conectá este MCP solo a agentes/sesiones en los que confiás.
+
+## Compatibilidad del remoto
+
+El servidor asume un VPS **GNU/Linux** típico. El runner de tasks y algunas
+tools usan utilidades GNU: `setsid`, `nohup`, `base64 -d`, `mktemp -d TEMPLATE`,
+`pkill -P`, `kill -- -PGID`, `stat`. En remotos **BusyBox** (Alpine) o **BSD**
+algunos de estos cambian de flags o no existen, y los tasks pueden no
+comportarse igual. Probado contra Ubuntu/Debian.

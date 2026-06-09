@@ -190,6 +190,24 @@ function shQuote(p) {
 // files — nothing is held open here.
 // ---------------------------------------------------------------------------
 
+/**
+ * Parse the `key=value` lines between the __META__ and __TAIL__ markers into a
+ * plain object. Per-field so a single malformed/empty value degrades only that
+ * field instead of nulling the whole status (robustness fix).
+ */
+function parseMetaBlock(stdout) {
+  const out = {};
+  const block = stdout.split("__META__\n")[1];
+  if (!block) return out;
+  const region = block.split("__TAIL__")[0];
+  for (const line of region.split("\n")) {
+    const i = line.indexOf("=");
+    if (i <= 0) continue;
+    out[line.slice(0, i)] = line.slice(i + 1).trim();
+  }
+  return out;
+}
+
 /** taskIds are produced by `mktemp -d .../task-XXXXXXXX`; validate strictly. */
 function assertTaskId(id) {
   if (!/^task-[A-Za-z0-9]+$/.test(String(id || ""))) {
@@ -198,10 +216,16 @@ function assertTaskId(id) {
 }
 
 /**
- * Resolve the effective task status from the raw files:
- * - exit file present  -> "finished" (with exitCode)
- * - process alive       -> "running"
- * - otherwise           -> "stopped" (died without recording an exit code)
+ * Resolve the effective task status from the raw files. The four states are
+ * distinguishable and not conflated:
+ * - exit file present                         -> "finished" (with exitCode)
+ * - process alive                              -> "running"
+ * - dead + status marked "stopped"             -> "stopped" (killed by ssh_task_stop)
+ * - dead + no exit + status still "running"    -> "crashed" (died without an exit
+ *   code: external kill, OOM, host reboot...)
+ *
+ * The "stopped" vs "crashed" split matters operationally: "stopped" means we
+ * killed it on purpose; "crashed" means it died on its own and warrants a look.
  */
 function resolveTaskState({ alive, exitCode, status }) {
   if (exitCode !== null && exitCode !== undefined && exitCode !== "") {
@@ -209,7 +233,8 @@ function resolveTaskState({ alive, exitCode, status }) {
   }
   if (alive) return { state: "running", exitCode: null };
   if (status === "stopped") return { state: "stopped", exitCode: null };
-  return { state: "stopped", exitCode: null };
+  // Dead, no recorded exit code, and never marked stopped -> it died on its own.
+  return { state: "crashed", exitCode: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +242,7 @@ function resolveTaskState({ alive, exitCode, status }) {
 // ---------------------------------------------------------------------------
 const server = new McpServer({
   name: "vps-mcp",
-  version: "1.3.0",
+  version: "1.4.0",
 });
 
 // Shared optional override schema so any tool can override the env defaults.
@@ -294,9 +319,9 @@ server.registerTool(
   async ({ path, maxBytes = 1048576, ...args }) => {
     try {
       // head -c keeps us under the limit; wc -c reports the true size.
-      const safePath = `'${String(path).replace(/'/g, "'\\''")}'`;
+      const safePath = shQuote(path);
       const r = await sshExec(
-        `size=$(wc -c < ${safePath} 2>/dev/null || echo -1); echo "__SIZE__:$size"; head -c ${maxBytes} ${safePath}`,
+        `size=$(wc -c < ${safePath} 2>/dev/null || echo -1); echo "__SIZE__:$size"; head -c ${Number(maxBytes)} ${safePath}`,
         args
       );
       const m = r.stdout.match(/^__SIZE__:(-?\d+)\n?/);
@@ -534,13 +559,13 @@ server.registerTool(
   }
 );
 
-// Tool: check a background task's status (running / finished / stopped) + tail.
+// Tool: check a background task's status (running / finished / stopped / crashed) + tail.
 server.registerTool(
   "ssh_task_status",
   {
     title: "Get a background task's status",
     description:
-      "Report whether a background task is running, finished (with exit code) or stopped, plus the last lines of its output. Stateless poll over a fresh SSH connection.",
+      "Report a background task's state — running, finished (with exit code), stopped (killed via ssh_task_stop) or crashed (died on its own: external kill, OOM, reboot) — plus the last lines of its output. Stateless poll over a fresh SSH connection.",
     inputSchema: {
       taskId: z.string().describe("The taskId returned by ssh_task_start"),
       lines: z.number().int().optional().describe("How many trailing output lines to include (default 40)"),
@@ -561,26 +586,33 @@ server.registerTool(
         `EX=$(cat "$TDIR/exit" 2>/dev/null)\n` +
         `STARTED=$(cat "$TDIR/started" 2>/dev/null)\n` +
         `ALIVE=no; if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then ALIVE=yes; fi\n` +
-        `echo "__META__ pid=$PID status=$ST exit=$EX alive=$ALIVE started=$STARTED"\n` +
+        // One key=value per line so a malformed field can't sink the whole parse.
+        `echo __META__\n` +
+        `echo "pid=$PID"\n` +
+        `echo "status=$ST"\n` +
+        `echo "exit=$EX"\n` +
+        `echo "alive=$ALIVE"\n` +
+        `echo "started=$STARTED"\n` +
         `echo __TAIL__\n` +
         `tail -n ${Number(lines)} "$TDIR/output.log" 2>/dev/null\n`;
       const r = await sshExec(script, args);
       if (r.stdout.includes("__NOTFOUND__")) {
         return { isError: true, content: [{ type: "text", text: `Task not found: ${taskId}` }] };
       }
-      const meta = r.stdout.match(
-        /__META__ pid=(\d*) status=(\S*) exit=(\d*) alive=(yes|no) started=(\S*)/
-      );
+      const meta = parseMetaBlock(r.stdout);
       const tail = r.stdout.split("__TAIL__\n")[1] || "";
-      const alive = meta?.[4] === "yes";
-      const exitRaw = meta?.[3] ?? "";
-      const { state, exitCode } = resolveTaskState({ alive, exitCode: exitRaw, status: meta?.[2] });
+      const alive = meta.alive === "yes";
+      const { state, exitCode } = resolveTaskState({
+        alive,
+        exitCode: meta.exit,
+        status: meta.status,
+      });
       return textResult({
         taskId,
         state,
         exitCode,
-        pid: meta?.[1] ? Number(meta[1]) : null,
-        startedAt: meta?.[5] || null,
+        pid: /^\d+$/.test(meta.pid || "") ? Number(meta.pid) : null,
+        startedAt: meta.started || null,
         outputTail: tail,
         host: r.host,
       });
