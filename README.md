@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-stdio-blue.svg)](https://modelcontextprotocol.io)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A518-green.svg)](https://nodejs.org)
+[![Version](https://img.shields.io/badge/version-1.4.1-blue.svg)](CHANGELOG.md)
 
 Servidor **MCP stateless** para conectarte a **cualquier VPS** por SSH usando
 **tus propias credenciales** y operar sobre él: ejecutar comandos, subir/bajar
@@ -156,6 +157,26 @@ MCP client (Claude Code/Desktop)
   abre y cierra su propia conexión. Robusto frente a sesiones colgadas.
 - **stdout reservado** para el canal MCP; los logs van a stderr.
 - Auth: si `VPS_KEY_PATH` está presente tiene prioridad sobre `VPS_PASSWORD`.
+
+## Estructura del proyecto
+
+```
+vps-mcp/
+├── index.js          # Entry del MCP: transporte stdio, sshExec/sshSftp y las 11 tools
+├── lib.js            # Helpers puros (sin red): buildConnConfig, shQuote,
+│                     #   parseMetaBlock, assertTaskId, resolveTaskState
+├── smoke-client.js   # Smoke test manual end-to-end contra un VPS real (npm run smoke)
+├── test/
+│   └── lib.test.js   # Tests unitarios de lib.js (node:test, sin red) — npm test
+├── package.json
+├── CHANGELOG.md
+├── LICENSE           # MIT
+└── README.md
+```
+
+Separación clave: la lógica pura vive en `lib.js` (testeable sin VPS); `index.js`
+solo orquesta SSH/SFTP y registra tools, y únicamente arranca el server cuando se
+ejecuta directamente (importarlo no abre stdio).
 
 ## Detalle de cada tool
 
