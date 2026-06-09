@@ -16,8 +16,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { Client } from "ssh2";
-import { readFileSync, statSync } from "node:fs";
-import { basename, posix } from "node:path";
+import { readFileSync, statSync, mkdirSync, existsSync } from "node:fs";
+import { basename, posix, dirname as localDirname } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Defaults pulled from environment (set these in your MCP client config).
@@ -183,7 +183,7 @@ function shQuote(p) {
 // ---------------------------------------------------------------------------
 const server = new McpServer({
   name: "vps-mcp",
-  version: "1.1.0",
+  version: "1.2.0",
 });
 
 // Shared optional override schema so any tool can override the env defaults.
@@ -382,6 +382,54 @@ server.registerTool(
       return textResult({ written: true, ...r, mode: mode || undefined });
     } catch (e) {
       return { isError: true, content: [{ type: "text", text: `Write failed: ${e.message}` }] };
+    }
+  }
+);
+
+// Tool: download a remote file to the local disk (backups, artifacts, binaries).
+server.registerTool(
+  "ssh_download_file",
+  {
+    title: "Download a file from the VPS",
+    description:
+      "Download a remote file from the VPS to a local path over SFTP. Handles binaries and large files (no size limit), unlike ssh_read_file. Creates the local parent directory if needed. Stateless — connection closed after the transfer.",
+    inputSchema: {
+      remotePath: z.string().describe("Absolute path of the remote file to download"),
+      localPath: z
+        .string()
+        .describe("Local destination path. If it ends with a separator, the remote filename is appended."),
+      mkdirp: z
+        .boolean()
+        .optional()
+        .describe("Create the local parent directory if missing (default true)"),
+      ...overrideShape,
+    },
+  },
+  async ({ remotePath, localPath, mkdirp = true, ...args }) => {
+    try {
+      // If localPath looks like a directory, keep the remote filename.
+      const endsWithSep = /[\\/]$/.test(localPath);
+      const dest = endsWithSep ? localPath + basename(remotePath) : localPath;
+
+      if (mkdirp) {
+        const dir = localDirname(dest);
+        if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
+      }
+
+      const r = await sshSftp((sftp, done) => {
+        // Confirm the remote file exists and grab its size first.
+        sftp.stat(remotePath, (err, stats) => {
+          if (err) return done(new Error(`Remote file not found or unreadable: ${remotePath}`));
+          sftp.fastGet(remotePath, dest, (e2) => {
+            if (e2) return done(e2);
+            done(null, { remotePath, localPath: dest, bytes: stats.size });
+          });
+        });
+      }, args);
+
+      return textResult({ downloaded: true, ...r });
+    } catch (e) {
+      return { isError: true, content: [{ type: "text", text: `Download failed: ${e.message}` }] };
     }
   }
 );

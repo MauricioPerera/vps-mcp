@@ -16,6 +16,7 @@ SSH, ejecuta y la cierra.
 | `ssh_exec` | Ejecuta un comando shell y devuelve `stdout`, `stderr` y `code`. |
 | `ssh_read_file` | Lee un archivo remoto (con límite de tamaño, por defecto 1 MiB). |
 | `ssh_upload_file` | Sube un archivo local al VPS por SFTP (deploy de artefactos). |
+| `ssh_download_file` | Descarga un archivo remoto a tu disco local (backups, binarios, sin límite). |
 | `ssh_write_file` | Escribe texto directo a un archivo remoto (configs, `.env`, scripts). |
 
 Las credenciales se definen **una vez** por variables de entorno en la config del
@@ -130,6 +131,14 @@ Sin argumentos obligatorios. Ejecuta `echo OK; id -un; hostname` y devuelve
 - `mode` (string, opcional): permisos octales, ej. `'0755'` para un ejecutable.
 - `mkdirp` (bool, opcional, default `true`): crea el directorio remoto si falta.
 
+### `ssh_download_file`
+- `remotePath` (string, obligatorio): ruta remota del archivo a descargar.
+- `localPath` (string, obligatorio): destino local. Si termina en `/` o `\`, se
+  añade el nombre del archivo remoto.
+- `mkdirp` (bool, opcional, default `true`): crea el directorio local si falta.
+- Maneja binarios y archivos grandes (sin límite de tamaño), a diferencia de
+  `ssh_read_file`.
+
 ### `ssh_write_file`
 - `remotePath` (string, obligatorio): ruta remota del archivo.
 - `content` (string, obligatorio): contenido de texto a escribir.
@@ -145,6 +154,13 @@ Todas aceptan además los overrides opcionales: `host`, `port`, `username`,
 ```text
 1) ssh_upload_file  localPath=./dist/app.tar.gz  remotePath=/opt/app/  mode=0644
 2) ssh_exec         command="cd /opt/app && tar xzf app.tar.gz && systemctl restart app"
+```
+
+Backup remoto → disco local:
+
+```text
+1) ssh_exec          command="pg_dump mydb | gzip > /tmp/db.sql.gz"
+2) ssh_download_file  remotePath=/tmp/db.sql.gz  localPath=D:/backups/
 ```
 
 O config + script sin archivo local:
