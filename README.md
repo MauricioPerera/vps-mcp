@@ -108,7 +108,7 @@ O manualmente en el JSON de config MCP:
 
 ## Prueba rápida (sin cliente MCP)
 
-El script `test-client.js` levanta el server por stdio y llama a
+El script `smoke-client.js` levanta el server por stdio y llama a
 `ssh_test_connection` + `ssh_exec`. Con `--write` prueba además la escritura y
 ejecución de un script remoto (y limpia al terminar).
 
@@ -116,14 +116,24 @@ PowerShell (Windows):
 
 ```powershell
 $env:VPS_HOST="<TU_IP>"; $env:VPS_USER="root"; $env:VPS_PASSWORD="<TU_PASSWORD>"
-node test-client.js          # solo lectura
-node test-client.js --write  # incluye write + exec en /tmp
+node smoke-client.js          # solo lectura
+node smoke-client.js --write  # incluye write + exec en /tmp
 ```
 
 Bash (Linux/macOS):
 
 ```bash
-VPS_HOST=<TU_IP> VPS_USER=root VPS_PASSWORD="<TU_PASSWORD>" node test-client.js
+VPS_HOST=<TU_IP> VPS_USER=root VPS_PASSWORD="<TU_PASSWORD>" node smoke-client.js
+```
+
+## Tests
+
+Tests unitarios de la lógica pura (sin red, sin VPS), con el runner nativo de
+Node:
+
+```bash
+npm test     # node --check de index.js/lib.js + node --test (test/)
+npm run smoke   # smoke-client.js contra un VPS real (requiere VPS_* en el entorno)
 ```
 
 ## Arquitectura

@@ -3,6 +3,22 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/) y
 [SemVer](https://semver.org/lang/es/).
 
+## [1.4.1]
+
+### Added
+- Suite de tests unitarios con el runner nativo `node:test` (`test/lib.test.js`,
+  13 tests, sin dependencias) cubriendo `shQuote`, `parseMetaBlock`,
+  `assertTaskId`, `resolveTaskState` y `buildConnConfig`. `npm test` los corre
+  más un `node --check` de `index.js`/`lib.js` (offline, sin VPS).
+
+### Changed
+- Refactor interno: las funciones puras se extrajeron a `lib.js` para poder
+  testearlas sin arrancar el server. Sin cambios de comportamiento.
+- `index.js` solo arranca el server cuando se ejecuta directamente
+  (`node index.js`); importarlo ya no abre stdio.
+- `test-client.js` renombrado a `smoke-client.js` (es un smoke test contra un
+  VPS real, y así no lo recoge `node --test`). `npm run smoke` lo ejecuta.
+
 ## [1.4.0]
 
 ### Added

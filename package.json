@@ -1,6 +1,6 @@
 {
   "name": "vps-mcp",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Stateless MCP server to connect to a VPS over SSH and run commands.",
   "license": "MIT",
   "author": "Mauricio Perera",
@@ -22,8 +22,8 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node --check index.js && node --check test-client.js",
-    "smoke": "node test-client.js"
+    "test": "node --check index.js && node --check lib.js && node --test",
+    "smoke": "node smoke-client.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
