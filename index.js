@@ -16,7 +16,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { Client } from "ssh2";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { basename, posix } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Defaults pulled from environment (set these in your MCP client config).
@@ -129,12 +130,60 @@ function sshExec(command, args = {}) {
   });
 }
 
+/**
+ * Open an SSH connection, run an SFTP operation via the provided callback,
+ * then close. The callback receives (sftp) and must call done(err, result).
+ * Fully stateless, same connection/timeout handling as sshExec.
+ */
+function sshSftp(work, args = {}) {
+  const config = buildConnConfig(args);
+  const timeoutMs = args.timeoutMs || ENV.timeoutMs;
+
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { conn.end(); } catch {}
+      reject(new Error(`SFTP operation timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+
+    const finish = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { conn.end(); } catch {}
+      fn(val);
+    };
+
+    conn
+      .on("ready", () => {
+        conn.sftp((err, sftp) => {
+          if (err) return finish(reject, err);
+          work(sftp, (e, result) => {
+            if (e) return finish(reject, e);
+            finish(resolve, { ...result, host: config.host });
+          });
+        });
+      })
+      .on("error", (err) => finish(reject, err))
+      .connect(config);
+  });
+}
+
+/** Quote a path for safe use inside a single-quoted shell string. */
+function shQuote(p) {
+  return `'${String(p).replace(/'/g, "'\\''")}'`;
+}
+
 // ---------------------------------------------------------------------------
 // MCP server definition
 // ---------------------------------------------------------------------------
 const server = new McpServer({
   name: "vps-mcp",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
 // Shared optional override schema so any tool can override the env defaults.
@@ -232,6 +281,107 @@ server.registerTool(
       });
     } catch (e) {
       return { isError: true, content: [{ type: "text", text: `Read failed: ${e.message}` }] };
+    }
+  }
+);
+
+// Tool: upload a local file to the VPS (for deployments, artifacts, tarballs).
+server.registerTool(
+  "ssh_upload_file",
+  {
+    title: "Upload a file to the VPS",
+    description:
+      "Upload a local file to a remote path on the VPS over SFTP. Useful for deployments and shipping artifacts. Creates the remote parent directory if needed. Stateless — connection closed after the transfer.",
+    inputSchema: {
+      localPath: z.string().describe("Absolute path of the local file to upload"),
+      remotePath: z
+        .string()
+        .describe("Remote destination path. If it ends with '/', the local filename is appended."),
+      mode: z
+        .string()
+        .optional()
+        .describe("Optional octal permissions for the uploaded file, e.g. '0755' for an executable"),
+      mkdirp: z
+        .boolean()
+        .optional()
+        .describe("Create the remote parent directory if missing (default true)"),
+      ...overrideShape,
+    },
+  },
+  async ({ localPath, remotePath, mode, mkdirp = true, ...args }) => {
+    try {
+      let size;
+      try {
+        size = statSync(localPath).size;
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: `Local file not found: ${localPath}` }] };
+      }
+      // If remotePath ends with '/', treat it as a directory and keep the name.
+      const dest = remotePath.endsWith("/")
+        ? posix.join(remotePath, basename(localPath))
+        : remotePath;
+
+      if (mkdirp) {
+        const dir = posix.dirname(dest);
+        await sshExec(`mkdir -p ${shQuote(dir)}`, args);
+      }
+
+      const r = await sshSftp((sftp, done) => {
+        const opts = mode ? { mode: parseInt(mode, 8) } : {};
+        sftp.fastPut(localPath, dest, opts, (err) => {
+          if (err) return done(err);
+          done(null, { localPath, remotePath: dest, bytes: size });
+        });
+      }, args);
+
+      return textResult({ uploaded: true, ...r, mode: mode || undefined });
+    } catch (e) {
+      return { isError: true, content: [{ type: "text", text: `Upload failed: ${e.message}` }] };
+    }
+  }
+);
+
+// Tool: write text content directly to a remote file (configs, .env, scripts).
+server.registerTool(
+  "ssh_write_file",
+  {
+    title: "Write text to a file on the VPS",
+    description:
+      "Write string content directly to a remote file over SFTP, without needing a local file. Ideal for config files, .env, or small scripts. Overwrites by default. Creates the remote parent directory if needed.",
+    inputSchema: {
+      remotePath: z.string().describe("Absolute remote path of the file to write"),
+      content: z.string().describe("The text content to write"),
+      mode: z
+        .string()
+        .optional()
+        .describe("Optional octal permissions, e.g. '0644' or '0755' for a script"),
+      append: z.boolean().optional().describe("Append instead of overwrite (default false)"),
+      mkdirp: z
+        .boolean()
+        .optional()
+        .describe("Create the remote parent directory if missing (default true)"),
+      ...overrideShape,
+    },
+  },
+  async ({ remotePath, content, mode, append = false, mkdirp = true, ...args }) => {
+    try {
+      if (mkdirp) {
+        const dir = posix.dirname(remotePath);
+        await sshExec(`mkdir -p ${shQuote(dir)}`, args);
+      }
+      const buf = Buffer.from(content, "utf8");
+      const r = await sshSftp((sftp, done) => {
+        const flags = append ? "a" : "w";
+        const opts = { flags, encoding: null };
+        if (mode) opts.mode = parseInt(mode, 8);
+        const ws = sftp.createWriteStream(remotePath, opts);
+        ws.on("close", () => done(null, { remotePath, bytes: buf.length, append }));
+        ws.on("error", (err) => done(err));
+        ws.end(buf);
+      }, args);
+      return textResult({ written: true, ...r, mode: mode || undefined });
+    } catch (e) {
+      return { isError: true, content: [{ type: "text", text: `Write failed: ${e.message}` }] };
     }
   }
 );

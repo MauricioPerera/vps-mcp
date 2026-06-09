@@ -1,6 +1,6 @@
 {
   "name": "vps-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Stateless MCP server to connect to a VPS over SSH and run commands.",
   "license": "MIT",
   "author": "Mauricio Perera",

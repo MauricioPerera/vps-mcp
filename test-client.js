@@ -31,5 +31,28 @@ console.log("\n-- ssh_exec: uptime --");
 const exec = await client.callTool({ name: "ssh_exec", arguments: { command: "uptime" } });
 console.log(exec.content[0].text);
 
+if (process.argv.includes("--write")) {
+  console.log("\n-- ssh_write_file --");
+  const w = await client.callTool({
+    name: "ssh_write_file",
+    arguments: {
+      remotePath: "/tmp/vps-mcp-test/hello.sh",
+      content: "#!/bin/sh\necho 'deployed via vps-mcp'\n",
+      mode: "0755",
+    },
+  });
+  console.log(w.content[0].text);
+
+  console.log("\n-- ssh_exec: run the written script --");
+  const run = await client.callTool({
+    name: "ssh_exec",
+    arguments: { command: "/tmp/vps-mcp-test/hello.sh" },
+  });
+  console.log(run.content[0].text);
+
+  console.log("\n-- cleanup --");
+  await client.callTool({ name: "ssh_exec", arguments: { command: "rm -rf /tmp/vps-mcp-test" } });
+}
+
 await client.close();
 process.exit(0);

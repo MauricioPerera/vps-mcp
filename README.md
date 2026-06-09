@@ -15,6 +15,8 @@ SSH, ejecuta y la cierra.
 | `ssh_test_connection` | Verifica conectividad y autenticación (devuelve user + hostname). |
 | `ssh_exec` | Ejecuta un comando shell y devuelve `stdout`, `stderr` y `code`. |
 | `ssh_read_file` | Lee un archivo remoto (con límite de tamaño, por defecto 1 MiB). |
+| `ssh_upload_file` | Sube un archivo local al VPS por SFTP (deploy de artefactos). |
+| `ssh_write_file` | Escribe texto directo a un archivo remoto (configs, `.env`, scripts). |
 
 Las credenciales se definen **una vez** por variables de entorno en la config del
 cliente MCP. Cualquier campo se puede sobreescribir por llamada (`host`, `port`,
@@ -121,8 +123,37 @@ Sin argumentos obligatorios. Ejecuta `echo OK; id -un; hostname` y devuelve
 - `maxBytes` (int, opcional, default `1048576`): corta la lectura para no
   inundar el contexto; marca `truncated: true` si el archivo es mayor.
 
+### `ssh_upload_file`
+- `localPath` (string, obligatorio): ruta local del archivo a subir.
+- `remotePath` (string, obligatorio): destino remoto. Si termina en `/`, se
+  añade el nombre del archivo local.
+- `mode` (string, opcional): permisos octales, ej. `'0755'` para un ejecutable.
+- `mkdirp` (bool, opcional, default `true`): crea el directorio remoto si falta.
+
+### `ssh_write_file`
+- `remotePath` (string, obligatorio): ruta remota del archivo.
+- `content` (string, obligatorio): contenido de texto a escribir.
+- `mode` (string, opcional): permisos octales, ej. `'0644'`.
+- `append` (bool, opcional, default `false`): añade en vez de sobrescribir.
+- `mkdirp` (bool, opcional, default `true`): crea el directorio remoto si falta.
+
 Todas aceptan además los overrides opcionales: `host`, `port`, `username`,
 `password`, `privateKeyPath`, `passphrase`, `timeoutMs`.
+
+## Ejemplo: deploy en 2 pasos
+
+```text
+1) ssh_upload_file  localPath=./dist/app.tar.gz  remotePath=/opt/app/  mode=0644
+2) ssh_exec         command="cd /opt/app && tar xzf app.tar.gz && systemctl restart app"
+```
+
+O config + script sin archivo local:
+
+```text
+1) ssh_write_file  remotePath=/opt/app/.env  content="NODE_ENV=production\nPORT=3000"
+2) ssh_write_file  remotePath=/opt/app/deploy.sh  content="#!/bin/sh\n..."  mode=0755
+3) ssh_exec        command=/opt/app/deploy.sh
+```
 
 ## Nota de seguridad
 
